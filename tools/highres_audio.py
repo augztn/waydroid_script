@@ -6,9 +6,11 @@ https://github.com/willbeez/waydroid-apple-music
 It supports one tested x86_64 Android 13 vendor image only. All source and
 patched-file hashes are checked; unknown images are rejected without changes.
 
-This enables a 32-bit/192 kHz host audio link on the matching image. It does not
-promise bit-perfect playback, which also depends on Android routing/mixing, the
-app, PipeWire negotiation and the physical output device.
+The Waydroid overlay provides a 32-bit/192 kHz host audio link on that image.
+An optional host PipeWire drop-in can pin the shared graph to 192 kHz; this
+affects all desktop audio and is disabled by default. Neither setting guarantees
+bit-perfect playback because Android routing/mixing, the app and output device
+remain part of the path.
 """
 from __future__ import annotations
 
@@ -16,6 +18,7 @@ import configparser
 import hashlib
 import json
 import os
+import pwd
 import shutil
 import subprocess
 import tempfile
@@ -28,6 +31,14 @@ OVERLAY_ROOT = Path("/var/lib/waydroid/overlay/vendor")
 STATE_DIR = Path("/var/lib/waydroid-script/highres-audio")
 STATE_PATH = STATE_DIR / "state.json"
 BACKUP_DIR = STATE_DIR / "backups"
+PIPEWIRE_DROPIN_NAME = "99-waydroid-script-highres.conf"
+PIPEWIRE_CONTENT = """# Managed by waydroid_script. Restored by highres-audio disable.
+# This pins the shared desktop graph to 192 kHz; other apps may be resampled.
+context.properties = {
+    default.clock.rate = 192000
+    default.clock.allowed-rates = [ 192000 ]
+}
+"""
 
 FILES: dict[str, dict[str, Any]] = {
     "lib/hw/audio.primary.waydroid.so": {
@@ -233,7 +244,127 @@ def _set_overlay_config(value: str | None) -> None:
         raise
 
 
-def _install_overlay(staged_root: Path, manifest: dict[str, str]) -> dict[str, Any]:
+def _desktop_identity() -> tuple[Path, int, int]:
+    """Resolve the real desktop account; never put user settings in root's home."""
+    sudo_user = os.environ.get("SUDO_USER")
+    if not sudo_user:
+        raise RuntimeError(
+            "--host-pipewire-192k requires running the command with sudo from the desktop user's session"
+        )
+    try:
+        record = pwd.getpwnam(sudo_user)
+    except KeyError as exc:
+        raise RuntimeError(f"Cannot resolve desktop user {sudo_user!r}") from exc
+    return Path(record.pw_dir), record.pw_uid, record.pw_gid
+
+
+def _prepare_pipewire_state() -> dict[str, Any]:
+    home, uid, gid = _desktop_identity()
+    if not shutil.which("pipewire"):
+        raise RuntimeError("PipeWire was not detected; omit --host-pipewire-192k on PulseAudio-only systems")
+    path = home / ".config" / "pipewire" / "pipewire.conf.d" / PIPEWIRE_DROPIN_NAME
+    if path.is_symlink():
+        raise RuntimeError(f"Refusing to replace a symlinked PipeWire config: {path}")
+    if path.exists() and not path.is_file():
+        raise RuntimeError(f"PipeWire config path is not a regular file: {path}")
+    return {
+        "enabled": True,
+        "path": str(path),
+        "existed": path.is_file(),
+        "backup": str(BACKUP_DIR / "pipewire-highres.conf.bak") if path.is_file() else None,
+        "installed_sha256": sha256(PIPEWIRE_CONTENT.encode("utf-8")),
+        "uid": uid,
+        "gid": gid,
+        "original_uid": path.stat().st_uid if path.is_file() else None,
+        "original_gid": path.stat().st_gid if path.is_file() else None,
+        "original_mode": path.stat().st_mode & 0o777 if path.is_file() else None,
+    }
+
+
+def _apply_pipewire_dropin(info: dict[str, Any]) -> None:
+    path = Path(info["path"])
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if path.is_symlink():
+        raise RuntimeError(f"Refusing to replace a symlinked PipeWire config: {path}")
+    temporary = path.with_name(path.name + ".highres-audio.new")
+    try:
+        temporary.write_text(PIPEWIRE_CONTENT, encoding="utf-8")
+        temporary.chmod(0o644)
+        os.chown(temporary, int(info["uid"]), int(info["gid"]))
+        if sha256(temporary.read_bytes()) != info["installed_sha256"]:
+            raise RuntimeError("Generated PipeWire drop-in failed checksum verification")
+        os.replace(temporary, path)
+    except Exception:
+        temporary.unlink(missing_ok=True)
+        raise
+
+
+def _restore_pipewire_dropin(info: dict[str, Any], *, rollback: bool = False) -> bool:
+    """Restore/remove the drop-in only if it still matches the version we installed."""
+    path = Path(info["path"])
+    backup_text = info.get("backup")
+    backup = Path(backup_text) if backup_text else None
+    existed = bool(info.get("existed"))
+
+    if existed and backup and backup.is_file() and path.is_file():
+        if sha256(path.read_bytes()) == sha256(backup.read_bytes()):
+            return True  # already restored by an earlier partial attempt
+    elif not existed and not path.exists():
+        return True  # already removed by an earlier partial attempt
+
+    if not path.is_file() or sha256(path.read_bytes()) != info["installed_sha256"]:
+        if rollback:
+            raise RuntimeError(f"PipeWire drop-in changed during installation; refusing rollback of {path}")
+        print(f"Leaving user-changed PipeWire config alone: {path}")
+        return False
+
+    if existed:
+        if not backup or not backup.is_file():
+            raise RuntimeError(f"Required PipeWire config backup is missing for {path}")
+        temporary = path.with_name(path.name + ".highres-audio.restore")
+        try:
+            shutil.copy2(backup, temporary)
+            os.chown(temporary, int(info["original_uid"]), int(info["original_gid"]))
+            os.chmod(temporary, int(info["original_mode"]))
+            os.replace(temporary, path)
+        except Exception:
+            temporary.unlink(missing_ok=True)
+            raise
+    else:
+        path.unlink()
+    return True
+
+
+def _restart_pipewire(uid: int) -> None:
+    systemctl = shutil.which("systemctl")
+    runtime_dir = Path(f"/run/user/{uid}")
+    bus = runtime_dir / "bus"
+    if not systemctl or not runtime_dir.is_dir() or not bus.exists():
+        print("PipeWire drop-in saved/restored, but the desktop session could not be restarted automatically.")
+        print("Restart PipeWire, PipeWire-Pulse and WirePlumber in your desktop session.")
+        return
+    env = os.environ.copy()
+    env["XDG_RUNTIME_DIR"] = str(runtime_dir)
+    env["DBUS_SESSION_BUS_ADDRESS"] = f"unix:path={bus}"
+    result = subprocess.run(
+        [systemctl, "--user", "restart", "pipewire.service", "pipewire-pulse.service", "wireplumber.service"],
+        env=env,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+        timeout=45,
+    )
+    if result.returncode:
+        print("PipeWire configuration saved/restored, but the service restart failed.")
+        print("Restart PipeWire, PipeWire-Pulse and WirePlumber from your desktop session.")
+
+
+def _install_overlay(
+    staged_root: Path,
+    manifest: dict[str, str],
+    pipewire_info: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     """Back up existing overlay files and atomically install verified outputs."""
     if STATE_DIR.exists():
         raise RuntimeError(
@@ -248,8 +379,10 @@ def _install_overlay(staged_root: Path, manifest: dict[str, str]) -> dict[str, A
         if not staged.is_file() or sha256(staged.read_bytes()) != manifest[relative]:
             raise RuntimeError(f"Staged file failed verification: {staged}")
         backup = BACKUP_DIR / (relative.replace("/", "__") + ".bak")
+        if destination.is_symlink():
+            raise RuntimeError(f"Refusing to replace symlinked overlay entry: {destination}")
         existed = destination.is_file()
-        if destination.exists() and not destination.is_file():
+        if destination.exists() and not existed:
             raise RuntimeError(f"Refusing to replace non-file overlay entry: {destination}")
         if backup.exists():
             raise RuntimeError(f"Backup path already exists; refusing to overwrite it: {backup}")
@@ -261,6 +394,18 @@ def _install_overlay(staged_root: Path, manifest: dict[str, str]) -> dict[str, A
             "existed": existed,
             "patched_sha256": manifest[relative],
         }
+
+    if pipewire_info and pipewire_info.get("enabled"):
+        pipewire_path = Path(pipewire_info["path"])
+        if pipewire_path.is_symlink():
+            raise RuntimeError(f"Refusing to replace symlinked PipeWire config: {pipewire_path}")
+        if pipewire_path.exists() and not pipewire_path.is_file():
+            raise RuntimeError(f"PipeWire config is not a regular file: {pipewire_path}")
+        if pipewire_info.get("existed"):
+            pipewire_backup = Path(str(pipewire_info["backup"]))
+            if pipewire_backup.exists():
+                raise RuntimeError(f"PipeWire backup already exists; refusing to overwrite it: {pipewire_backup}")
+            shutil.copy2(pipewire_path, pipewire_backup)
 
     cfg = _config()
     overlay_present = cfg.has_option("waydroid", "mount_overlays")
@@ -276,6 +421,7 @@ def _install_overlay(staged_root: Path, manifest: dict[str, str]) -> dict[str, A
             "mount_overlays_previous": overlay_previous,
             "mount_overlays_applied": "True",
         },
+        "pipewire": pipewire_info or {"enabled": False},
         "manifest": manifest,
     }
     _write_json_atomic(STATE_PATH, payload)
@@ -291,10 +437,17 @@ def _install_overlay(staged_root: Path, manifest: dict[str, str]) -> dict[str, A
                 raise RuntimeError(f"Staged copy verification failed: {destination}")
             os.replace(temporary, destination)
         _set_overlay_config("True")
+        if pipewire_info and pipewire_info.get("enabled"):
+            _apply_pipewire_dropin(pipewire_info)
         payload["installed"] = True
         _write_json_atomic(STATE_PATH, payload)
     except Exception:
         rollback_errors: list[str] = []
+        if pipewire_info and pipewire_info.get("enabled"):
+            try:
+                _restore_pipewire_dropin(pipewire_info, rollback=True)
+            except Exception as rollback_error:
+                rollback_errors.append(f"{pipewire_info['path']}: {rollback_error}")
         for relative, item in reversed(list(file_state.items())):
             destination = Path(item["destination"])
             try:
@@ -343,11 +496,11 @@ def _stop_container() -> None:
     )
     if result.returncode:
         detail = (result.stderr or result.stdout).strip()
-        status = subprocess.run(
+        status_result = subprocess.run(
             ["waydroid", "status"], text=True, stdout=subprocess.PIPE,
             stderr=subprocess.PIPE, check=False, timeout=15
         )
-        if status.returncode or "Container: STOPPED" not in status.stdout:
+        if status_result.returncode or "Container: STOPPED" not in status_result.stdout:
             raise RuntimeError(f"Could not stop Waydroid container: {detail}")
 
 
@@ -365,7 +518,7 @@ def _reload_waydroid() -> None:
         raise RuntimeError(f"Waydroid reload failed: {detail}")
 
 
-def enable() -> None:
+def enable(host_pipewire_192k: bool = False) -> None:
     if os.geteuid() != 0:
         raise RuntimeError("Run with sudo: sudo venv/bin/python3 main.py highres-audio enable")
     if not shutil.which("waydroid"):
@@ -377,6 +530,7 @@ def enable() -> None:
             f"Audio patch state/backups already exist at {STATE_DIR}; inspect or restore them before retrying"
         )
 
+    pipewire_info = _prepare_pipewire_state() if host_pipewire_192k else None
     image = _vendor_image_path()
     with tempfile.TemporaryDirectory(prefix="waydroid-highres-audio-") as temp_dir:
         staged_root = Path(temp_dir)
@@ -384,7 +538,7 @@ def enable() -> None:
         # its config/overlay. Unsupported vendor images fail without side effects.
         manifest = build_overlay(image, staged_root)
         _stop_container()
-        _install_overlay(staged_root, manifest)
+        _install_overlay(staged_root, manifest, pipewire_info)
 
     try:
         _reload_waydroid()
@@ -392,7 +546,13 @@ def enable() -> None:
         print(f"WARNING: overlay installed but Waydroid reload failed: {exc}")
         print("Run 'sudo venv/bin/python3 main.py highres-audio disable' to restore it.")
         raise
+    if pipewire_info and pipewire_info.get("enabled"):
+        _restart_pipewire(int(pipewire_info["uid"]))
     print("Installed the checksum-verified 32-bit/192 kHz Waydroid audio overlay.")
+    if pipewire_info:
+        print("Also configured the desktop PipeWire graph at a fixed 192 kHz rate.")
+    else:
+        print("The host PipeWire graph was left unchanged; it may resample higher-rate streams.")
     print("This does not guarantee bit-perfect playback. Verify the active stream with pw-top.")
     print("Restore with: sudo venv/bin/python3 main.py highres-audio disable")
 
@@ -409,7 +569,7 @@ def disable() -> None:
 
     _stop_container()
     skipped_paths: list[str] = []
-    for relative, item in payload["files"].items():
+    for _relative, item in payload["files"].items():
         destination = Path(item["destination"])
         backup = Path(item["backup"]) if item.get("backup") else None
         if item["existed"] and backup and backup.is_file():
@@ -419,11 +579,9 @@ def disable() -> None:
 
         if item["existed"] and original_hash is not None and destination.is_file():
             if sha256(destination.read_bytes()) == original_hash:
-                # Already restored during a previous partial run.
-                continue
+                continue  # already restored in a previous partial run
         elif not item["existed"] and not destination.exists():
-            # Already removed during a previous partial run.
-            continue
+            continue  # already removed in a previous partial run
 
         if not destination.is_file() or sha256(destination.read_bytes()) != item["patched_sha256"]:
             skipped_paths.append(f"{destination} (changed or removed externally)")
@@ -438,13 +596,20 @@ def disable() -> None:
         except OSError as exc:
             raise RuntimeError(f"Could not restore {destination}: {exc}") from exc
 
+    pipewire_info = payload.get("pipewire", {"enabled": False})
+    if pipewire_info.get("enabled"):
+        try:
+            if not _restore_pipewire_dropin(pipewire_info):
+                skipped_paths.append(f"{pipewire_info['path']} (changed by user)")
+        except OSError as exc:
+            raise RuntimeError(f"Could not restore PipeWire drop-in: {exc}") from exc
+
     config_state = payload.get("config", {})
     current = _config().get("waydroid", "mount_overlays", fallback=None)
     previous_present = config_state.get("mount_overlays_present", False)
     previous_value = config_state.get("mount_overlays_previous")
     if current == previous_value and bool(previous_present) == (previous_value is not None):
-        # The original value is already restored.
-        pass
+        pass  # already restored in an earlier partial run
     elif current == config_state.get("mount_overlays_applied"):
         if previous_present and previous_value is not None:
             _set_overlay_config(previous_value)
@@ -459,6 +624,9 @@ def disable() -> None:
         print("WARNING: restore files were written but Waydroid reload failed.")
         print("State and backups were retained so you can retry after checking Waydroid.")
         raise
+
+    if pipewire_info.get("enabled"):
+        _restart_pipewire(int(pipewire_info["uid"]))
 
     if skipped_paths:
         print("Some entries were left unchanged because they were removed or modified externally:")
@@ -488,13 +656,22 @@ def status() -> None:
         return
     print("High-resolution audio patch state: installed" if payload.get("installed") else
           "High-resolution audio patch state: incomplete; inspect backups manually")
-    for relative, item in payload["files"].items():
+    for _relative, item in payload["files"].items():
         destination = Path(item["destination"])
         if destination.is_file():
             state = "patched" if sha256(destination.read_bytes()) == item["patched_sha256"] else "modified"
         else:
             state = "missing"
-        print(f"{relative}: {state}")
+        print(f"{Path(destination).name}: {state}")
+    pipewire_info = payload.get("pipewire", {"enabled": False})
+    if pipewire_info.get("enabled"):
+        path = Path(pipewire_info["path"])
+        if path.is_file() and sha256(path.read_bytes()) == pipewire_info["installed_sha256"]:
+            print(f"Host PipeWire graph pin: enabled ({path})")
+        else:
+            print(f"Host PipeWire config changed or missing ({path})")
+    else:
+        print("Host PipeWire graph was not changed by this patch.")
 
 
 def main() -> int:
@@ -502,10 +679,15 @@ def main() -> int:
 
     parser = argparse.ArgumentParser(description="Manage the checksum-guarded Waydroid high-resolution audio overlay")
     parser.add_argument("action", choices=("enable", "disable", "status"))
+    parser.add_argument(
+        "--host-pipewire-192k",
+        action="store_true",
+        help="Also pin the host PipeWire graph to 192 kHz (affects all desktop audio)",
+    )
     args = parser.parse_args()
     try:
         if args.action == "enable":
-            enable()
+            enable(host_pipewire_192k=args.host_pipewire_192k)
         elif args.action == "disable":
             disable()
         else:
