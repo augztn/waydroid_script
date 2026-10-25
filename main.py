@@ -18,6 +18,9 @@ from stuff.nodataperm import Nodataperm
 from stuff.smartdock import Smartdock
 from stuff.widevine import Widevine
 from stuff.fdroidpriv import FDroidPriv
+from tools.highres_audio import enable as enable_highres_audio
+from tools.highres_audio import disable as disable_highres_audio
+from tools.highres_audio import status as status_highres_audio
 import tools.helper as helper
 from tools import container
 from tools import images
@@ -38,7 +41,7 @@ def mount(partition, copy_dir):
         mount_point = os.path.join(copy_dir)
     else:
         mount_point = os.path.join(copy_dir, partition)
-    Logger.info("Mounting {} to {}".format(img, mount_point))
+    Logger.info("Mounting {} to {}" .format(img, mount_point))
     images.mount(img, mount_point)
 
 
@@ -221,6 +224,7 @@ def interact():
             "Install",
             "Remove",
             "Hack",
+            "Configure high-resolution audio",
             "Get Google Device ID to Get Certified"
         ],
         instruction="([↑↓]: Select Item)",
@@ -274,6 +278,31 @@ def interact():
         ).execute()
         args.option_name = apps
         hack_option(args)
+    elif action == "Configure high-resolution audio":
+        audio_action = inquirer.select(
+            message="High-resolution audio configuration",
+            choices=[
+                Choice(name="Check current status", value="status"),
+                Choice(name="Install supported 32-bit/192 kHz patch", value="enable"),
+                Choice(name="Restore original Waydroid audio files", value="disable"),
+                Choice(name="Back / exit", value=None),
+            ],
+        ).execute()
+        if audio_action == "enable":
+            confirmed = inquirer.confirm(
+                message="This patch only supports one checksum-verified x86_64 Android 13 image. Unknown images are rejected. Continue?",
+                default=False,
+            ).execute()
+            if confirmed:
+                use_pipewire_192k = inquirer.confirm(
+                    message="Also pin the host PipeWire graph to 192 kHz? This affects all desktop audio and may resample other apps.",
+                    default=False,
+                ).execute()
+                enable_highres_audio(host_pipewire_192k=use_pipewire_192k)
+        elif audio_action == "disable":
+            disable_highres_audio()
+        elif audio_action == "status":
+            status_highres_audio()
     elif action == "Get Google Device ID to Get Certified":
         AndroidId().get_id()
 
@@ -290,7 +319,6 @@ def main():
                         default="13",
                         choices=["11", "13"])
 
-    # android command
     certified = subparsers.add_parser(
         'certified', help='Get device ID to obtain Play Store certification')
     certified.set_defaults(func=get_certified)
@@ -305,7 +333,6 @@ def main():
         "dest": "app",
         "type": str,
         "nargs": '+',
-        # "metavar":"",
     }
 
     install_help = """
@@ -318,7 +345,6 @@ mitm -c CA_CERT_FILE: Install root CA cert into system trust store
 smartdock: A desktop mode launcher for Android
 widevine: Add support for widevine DRM L3
     """
-    # install and its aliases
     install_parser = subparsers.add_parser(
         'install', formatter_class=argparse.RawTextHelpFormatter, help='Install an app')
     install_parser.add_argument(
@@ -329,23 +355,34 @@ widevine: Add support for widevine DRM L3
                                 default=None)
     install_parser.set_defaults(func=install_app)
 
-    # remove and its aliases
     remove_parser = subparsers.add_parser(
         'remove', aliases=["uninstall"], help='Remove an app')
     remove_parser.add_argument(
         **arg_template, choices=[*remove_choices, * hack_choices], help='Name of app to remove')
     remove_parser.set_defaults(func=remove_app)
 
-    # hack and its aliases
     hack_parser = subparsers.add_parser('hack', help='Hack the system')
     hack_parser.add_argument(
         'option_name', nargs="+", choices=hack_choices, help='Name of hack option')
     hack_parser.set_defaults(func=hack_option)
 
+    audio_parser = subparsers.add_parser(
+        "highres-audio", help="Manage the checksum-guarded Waydroid high-resolution audio patch")
+    audio_parser.add_argument("action", choices=["enable", "disable", "status"])
+    audio_parser.add_argument(
+        "--host-pipewire-192k",
+        action="store_true",
+        help="Also pin the host PipeWire graph to 192 kHz (affects all desktop audio)",
+    )
+    audio_parser.set_defaults(func=lambda args: {
+        "enable": lambda: enable_highres_audio(host_pipewire_192k=args.host_pipewire_192k),
+        "disable": lambda: disable_highres_audio(),
+        "status": lambda: status_highres_audio(),
+    }[args.action]())
+
     args = parser.parse_args()
     args.microg_variant = "Standard"
     if hasattr(args, 'func'):
-        args_dict = vars(args)
         helper.check_root()
         args.func(args)
     else:

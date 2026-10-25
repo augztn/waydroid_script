@@ -37,7 +37,41 @@ sudo venv/bin/python3 main.py uninstall {gapps, magisk, libndk, libhoudini, noda
 sudo venv/bin/python3 main.py certified
 # some hacks
 sudo venv/bin/python3 main.py hack {nodataperm, hidestatusbar}
+# high-resolution audio (only one checksum-verified image is supported)
+sudo venv/bin/python3 main.py highres-audio status
+# Install the Waydroid patch without changing host PipeWire
+sudo venv/bin/python3 main.py highres-audio enable
+# OR, instead of the previous enable command, also pin the host graph to 192 kHz
+sudo venv/bin/python3 main.py highres-audio enable --host-pipewire-192k
+# Undo either installation mode
+sudo venv/bin/python3 main.py highres-audio disable
 ```
+
+## High-resolution audio
+
+Waydroid's stock audio HAL uses a 16-bit/48 kHz output path, which means a host PipeWire format change alone cannot expose higher-resolution PCM. This script includes a **strict checksum-guarded 32-bit/192 kHz patch** adapted from the MIT-licensed [waydroid-apple-music project](https://github.com/willbeez/waydroid-apple-music).
+
+The helper extracts the HAL and policy files from your local `vendor.img`, verifies the exact source SHA-256 values, applies known binary edits, verifies the patched hashes, and installs them into Waydroid's overlay. It does not download a precompiled HAL. It requires `debugfs` from the `e2fsprogs` package.
+
+**Compatibility is currently limited to one tested x86_64 Android 13 MAINLINE GAPPS vendor image.** If your local image differs, the helper refuses to modify anything. Do not remove the checks or apply binary offsets to other builds.
+
+The operation backs up existing overlay files and the previous `mount_overlays` setting, stops Waydroid before changing its overlay, records rollback state, and provides a restore command.
+
+```bash
+sudo venv/bin/python3 main.py highres-audio status
+# Install the Waydroid patch without changing host PipeWire
+sudo venv/bin/python3 main.py highres-audio enable
+# OR, instead of the previous enable command, also pin the host graph to 192 kHz
+sudo venv/bin/python3 main.py highres-audio enable --host-pipewire-192k
+# Undo either installation mode
+sudo venv/bin/python3 main.py highres-audio disable
+```
+
+The patch changes the Waydroid host audio link to 32-bit PCM at 192 kHz. It does **not** guarantee bit-perfect output; Android mixer/routing, app behaviour, PipeWire rate negotiation, the DAC, and any Bluetooth codec still affect the final signal. Verify the live stream with `pw-top` and check the actual output device.
+
+By default, this script leaves the host PipeWire graph unchanged, so PipeWire may resample a 192 kHz stream to the graph's current rate. On a PipeWire system, the optional `--host-pipewire-192k` flag also writes a backed-up `pipewire.conf.d` drop-in that pins the shared desktop graph to 192 kHz. This affects **all desktop audio**, and other applications may be resampled into that graph. The setting is opt-in and is removed/restored by `highres-audio disable`. Do not use the flag with standalone PulseAudio or when you do not want a global audio change.
+
+This feature is experimental. Keep a backup of your Waydroid data and restore the audio patch before updating/reinitializing Waydroid.
 
 ## Dependencies
 
