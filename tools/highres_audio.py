@@ -307,7 +307,13 @@ def _restore_pipewire_dropin(info: dict[str, Any], *, rollback: bool = False) ->
     existed = bool(info.get("existed"))
 
     if existed and backup and backup.is_file() and path.is_file():
-        if sha256(path.read_bytes()) == sha256(backup.read_bytes()):
+        stat = path.stat()
+        metadata_matches = (
+            stat.st_uid == info.get("original_uid")
+            and stat.st_gid == info.get("original_gid")
+            and (stat.st_mode & 0o777) == info.get("original_mode")
+        )
+        if sha256(path.read_bytes()) == sha256(backup.read_bytes()) and metadata_matches:
             return True  # already restored by an earlier partial attempt
     elif not existed and not path.exists():
         return True  # already removed by an earlier partial attempt
@@ -365,67 +371,74 @@ def _install_overlay(
     manifest: dict[str, str],
     pipewire_info: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Back up existing overlay files and atomically install verified outputs."""
+    """Back up existing files, record recovery state, and install verified outputs."""
     if STATE_DIR.exists():
         raise RuntimeError(
             f"Audio patch state/backups already exist at {STATE_DIR}; inspect or restore them before retrying"
         )
 
-    BACKUP_DIR.mkdir(parents=True, exist_ok=True)
     file_state: dict[str, dict[str, Any]] = {}
-    for relative in MANAGED_FILES:
-        destination = _overlay_path(relative)
-        staged = staged_root / "vendor" / relative
-        if not staged.is_file() or sha256(staged.read_bytes()) != manifest[relative]:
-            raise RuntimeError(f"Staged file failed verification: {staged}")
-        backup = BACKUP_DIR / (relative.replace("/", "__") + ".bak")
-        if destination.is_symlink():
-            raise RuntimeError(f"Refusing to replace symlinked overlay entry: {destination}")
-        existed = destination.is_file()
-        if destination.exists() and not existed:
-            raise RuntimeError(f"Refusing to replace non-file overlay entry: {destination}")
-        if backup.exists():
-            raise RuntimeError(f"Backup path already exists; refusing to overwrite it: {backup}")
-        if existed:
-            shutil.copy2(destination, backup)
-        file_state[relative] = {
-            "destination": str(destination),
-            "backup": str(backup) if existed else None,
-            "existed": existed,
-            "patched_sha256": manifest[relative],
+    pipewire_path = Path(pipewire_info["path"]) if pipewire_info and pipewire_info.get("enabled") else None
+    try:
+        BACKUP_DIR.mkdir(parents=True, exist_ok=False)
+        for relative in MANAGED_FILES:
+            destination = _overlay_path(relative)
+            staged = staged_root / "vendor" / relative
+            if not staged.is_file() or sha256(staged.read_bytes()) != manifest[relative]:
+                raise RuntimeError(f"Staged file failed verification: {staged}")
+            backup = BACKUP_DIR / (relative.replace("/", "__") + ".bak")
+            if destination.is_symlink():
+                raise RuntimeError(f"Refusing to replace symlinked overlay entry: {destination}")
+            existed = destination.is_file()
+            if destination.exists() and not existed:
+                raise RuntimeError(f"Refusing to replace non-file overlay entry: {destination}")
+            if backup.exists():
+                raise RuntimeError(f"Backup path already exists; refusing to overwrite it: {backup}")
+            if existed:
+                shutil.copy2(destination, backup)
+            file_state[relative] = {
+                "destination": str(destination),
+                "backup": str(backup) if existed else None,
+                "existed": existed,
+                "patched_sha256": manifest[relative],
+            }
+
+        if pipewire_path is not None:
+            if pipewire_path.is_symlink():
+                raise RuntimeError(f"Refusing to replace symlinked PipeWire config: {pipewire_path}")
+            if pipewire_path.exists() and not pipewire_path.is_file():
+                raise RuntimeError(f"PipeWire config is not a regular file: {pipewire_path}")
+            if pipewire_info.get("existed"):
+                pipewire_backup = Path(str(pipewire_info["backup"]))
+                if pipewire_backup.exists():
+                    raise RuntimeError(f"PipeWire backup already exists; refusing to overwrite it: {pipewire_backup}")
+                shutil.copy2(pipewire_path, pipewire_backup)
+
+        cfg = _config()
+        overlay_present = cfg.has_option("waydroid", "mount_overlays")
+        overlay_previous = cfg.get("waydroid", "mount_overlays", fallback=None)
+        payload: dict[str, Any] = {
+            "version": 1,
+            "installed": False,
+            "vendor_image": str(_vendor_image_path()),
+            "files": file_state,
+            "config": {
+                "path": str(CONFIG_PATH),
+                "mount_overlays_present": overlay_present,
+                "mount_overlays_previous": overlay_previous,
+                "mount_overlays_applied": "True",
+            },
+            "pipewire": pipewire_info or {"enabled": False},
+            "manifest": manifest,
         }
+        _write_json_atomic(STATE_PATH, payload)
+    except Exception:
+        # No destination has been modified yet; delete only the backups created
+        # by this attempt so a retry cannot be blocked by an orphan state dir.
+        shutil.rmtree(STATE_DIR, ignore_errors=True)
+        raise
 
-    if pipewire_info and pipewire_info.get("enabled"):
-        pipewire_path = Path(pipewire_info["path"])
-        if pipewire_path.is_symlink():
-            raise RuntimeError(f"Refusing to replace symlinked PipeWire config: {pipewire_path}")
-        if pipewire_path.exists() and not pipewire_path.is_file():
-            raise RuntimeError(f"PipeWire config is not a regular file: {pipewire_path}")
-        if pipewire_info.get("existed"):
-            pipewire_backup = Path(str(pipewire_info["backup"]))
-            if pipewire_backup.exists():
-                raise RuntimeError(f"PipeWire backup already exists; refusing to overwrite it: {pipewire_backup}")
-            shutil.copy2(pipewire_path, pipewire_backup)
-
-    cfg = _config()
-    overlay_present = cfg.has_option("waydroid", "mount_overlays")
-    overlay_previous = cfg.get("waydroid", "mount_overlays", fallback=None)
-    payload: dict[str, Any] = {
-        "version": 1,
-        "installed": False,
-        "vendor_image": str(_vendor_image_path()),
-        "files": file_state,
-        "config": {
-            "path": str(CONFIG_PATH),
-            "mount_overlays_present": overlay_present,
-            "mount_overlays_previous": overlay_previous,
-            "mount_overlays_applied": "True",
-        },
-        "pipewire": pipewire_info or {"enabled": False},
-        "manifest": manifest,
-    }
-    _write_json_atomic(STATE_PATH, payload)
-
+    overlay_config_changed = False
     try:
         for relative in MANAGED_FILES:
             destination = _overlay_path(relative)
@@ -437,6 +450,7 @@ def _install_overlay(
                 raise RuntimeError(f"Staged copy verification failed: {destination}")
             os.replace(temporary, destination)
         _set_overlay_config("True")
+        overlay_config_changed = True
         if pipewire_info and pipewire_info.get("enabled"):
             _apply_pipewire_dropin(pipewire_info)
         payload["installed"] = True
@@ -457,15 +471,14 @@ def _install_overlay(
                     destination.unlink(missing_ok=True)
             except OSError as rollback_error:
                 rollback_errors.append(f"{destination}: {rollback_error}")
-        try:
-            live = _config()
-            if live.get("waydroid", "mount_overlays", fallback=None) == "True":
+        if overlay_config_changed:
+            try:
                 if overlay_present:
                     _set_overlay_config(overlay_previous)
                 else:
                     _set_overlay_config(None)
-        except Exception as rollback_error:
-            rollback_errors.append(f"{CONFIG_PATH}: {rollback_error}")
+            except Exception as rollback_error:
+                rollback_errors.append(f"{CONFIG_PATH}: {rollback_error}")
         if rollback_errors:
             raise RuntimeError(
                 "Install failed and rollback was incomplete; backups retained at "
@@ -474,7 +487,6 @@ def _install_overlay(
         shutil.rmtree(STATE_DIR, ignore_errors=True)
         raise
     return payload
-
 
 def _stop_container() -> None:
     # Stop the session first so overlay files cannot be open in a mounted rootfs.
