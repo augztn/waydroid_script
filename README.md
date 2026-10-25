@@ -59,7 +59,11 @@ The operation backs up existing overlay files and the previous `mount_overlays` 
 
 ```bash
 sudo venv/bin/python3 main.py highres-audio status
+# Install the Waydroid patch without changing host PipeWire
 sudo venv/bin/python3 main.py highres-audio enable
+# OR, instead of the previous enable command, also pin the host graph to 192 kHz
+sudo venv/bin/python3 main.py highres-audio enable --host-pipewire-192k
+# Undo either installation mode
 sudo venv/bin/python3 main.py highres-audio disable
 ```
 
