@@ -1,6 +1,7 @@
 """Unit tests for the checksum-guarded high-resolution audio patcher."""
 from __future__ import annotations
 
+import configparser
 import hashlib
 import importlib.util
 import os
@@ -120,6 +121,28 @@ class HighResPatcherTests(unittest.TestCase):
             }
             self.assertTrue(MODULE._restore_pipewire_dropin(info))
             self.assertFalse(destination.exists())
+
+    def test_overlay_config_update_preserves_mode_and_other_values(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            config_path = Path(temp) / "waydroid.cfg"
+            config_path.write_text(
+                "[waydroid]\nmount_overlays = False\ncustom_value = preserve-me\n\n[properties]\nkey=value\n",
+                encoding="utf-8",
+            )
+            config_path.chmod(0o640)
+            original_path = MODULE.CONFIG_PATH
+            MODULE.CONFIG_PATH = config_path
+            try:
+                MODULE._set_overlay_config("True")
+            finally:
+                MODULE.CONFIG_PATH = original_path
+
+            config = configparser.ConfigParser(interpolation=None)
+            config.read(config_path)
+            self.assertEqual(config.get("waydroid", "mount_overlays"), "True")
+            self.assertEqual(config.get("waydroid", "custom_value"), "preserve-me")
+            self.assertEqual(config.get("properties", "key"), "value")
+            self.assertEqual(config_path.stat().st_mode & 0o777, 0o640)
 
     def test_build_overlay_rejects_unknown_image_before_writing(self) -> None:
         original_files = MODULE.FILES
