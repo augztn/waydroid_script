@@ -1,0 +1,23 @@
+name: High-resolution audio patcher tests
+
+on:
+  push:
+    branches:
+      - main
+      - feature/waydroid-hal-24bit-audio
+  pull_request:
+
+jobs:
+  python-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Compile Python modules
+        run: python -m compileall -q main.py tools/highres_audio.py tests
+      - name: Run patcher unit tests
+        run: python -m unittest discover -s tests -v
