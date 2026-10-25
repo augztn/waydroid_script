@@ -40,6 +40,8 @@ sudo venv/bin/python3 main.py hack {nodataperm, hidestatusbar}
 # high-resolution audio (only one checksum-verified image is supported)
 sudo venv/bin/python3 main.py highres-audio status
 sudo venv/bin/python3 main.py highres-audio enable
+# Optional: also pin the host PipeWire graph to 192 kHz
+sudo venv/bin/python3 main.py highres-audio enable --host-pipewire-192k
 sudo venv/bin/python3 main.py highres-audio disable
 ```
 
@@ -59,7 +61,9 @@ sudo venv/bin/python3 main.py highres-audio enable
 sudo venv/bin/python3 main.py highres-audio disable
 ```
 
-The patch changes the Waydroid host audio link to 32-bit PCM at 192 kHz. It does **not** guarantee bit-perfect output; Android mixer/routing, app behaviour, PipeWire rate negotiation, the DAC, and any Bluetooth codec still affect the final signal. Verify the live stream with `pw-top` and check the actual output device. The script does not force a global PipeWire 192 kHz clock because that would change audio behaviour for the whole desktop.
+The patch changes the Waydroid host audio link to 32-bit PCM at 192 kHz. It does **not** guarantee bit-perfect output; Android mixer/routing, app behaviour, PipeWire rate negotiation, the DAC, and any Bluetooth codec still affect the final signal. Verify the live stream with `pw-top` and check the actual output device.
+
+By default, this script leaves the host PipeWire graph unchanged, so PipeWire may resample a 192 kHz stream to the graph's current rate. On a PipeWire system, the optional `--host-pipewire-192k` flag also writes a backed-up `pipewire.conf.d` drop-in that pins the shared desktop graph to 192 kHz. This affects **all desktop audio**, and other applications may be resampled into that graph. The setting is opt-in and is removed/restored by `highres-audio disable`. Do not use the flag with standalone PulseAudio or when you do not want a global audio change.
 
 This feature is experimental. Keep a backup of your Waydroid data and restore the audio patch before updating/reinitializing Waydroid.
 
