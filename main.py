@@ -18,11 +18,12 @@ from stuff.nodataperm import Nodataperm
 from stuff.smartdock import Smartdock
 from stuff.widevine import Widevine
 from stuff.fdroidpriv import FDroidPriv
+from tools.audio24 import enable as enable_24bit_audio
+from tools.audio24 import disable as disable_24bit_audio
+from tools.audio24 import status as status_24bit_audio
 import tools.helper as helper
 from tools import container
 from tools import images
-
-import argparse
 
 from tools.logger import Logger
 
@@ -221,6 +222,7 @@ def interact():
             "Install",
             "Remove",
             "Hack",
+            "Configure 24-bit host audio",
             "Get Google Device ID to Get Certified"
         ],
         instruction="([↑↓]: Select Item)",
@@ -242,15 +244,13 @@ def interact():
             invalid_message="should be at least 1 selection",
             choices=install_choices
         ).execute()
-        microg_variants = ["Standard", "NoGoolag",
-                           "UNLP", "Minimal", "MinimalIAP"]
+        microg_variants = ["Standard", "NoGoolag", "UNLP", "Minimal", "MinimalIAP"]
         if "microg" in apps:
-            microg_variant = inquirer.select(
+            args.microg_variant = inquirer.select(
                 message="Select MicroG variant",
                 choices=microg_variants,
                 default="Standard",
             ).execute()
-            args.microg_variant = microg_variant
         args.app = apps
         install_app(args)
     elif action == "Remove":
@@ -274,16 +274,32 @@ def interact():
         ).execute()
         args.option_name = apps
         hack_option(args)
+    elif action == "Configure 24-bit host audio":
+        audio_action = inquirer.select(
+            message="24-bit host audio configuration",
+            choices=[
+                Choice(name="Enable 24-bit PCM override", value="enable"),
+                Choice(name="Disable / restore previous configuration", value="disable"),
+                Choice(name="Show status", value="status"),
+                Choice(name="Back / exit", value=None),
+            ],
+        ).execute()
+        if audio_action == "enable":
+            enable_24bit_audio()
+        elif audio_action == "disable":
+            disable_24bit_audio()
+        elif audio_action == "status":
+            status_24bit_audio()
     elif action == "Get Google Device ID to Get Certified":
         AndroidId().get_id()
 
 
 def main():
-    parser = argparse.ArgumentParser(description='''
+    parser = argparse.ArgumentParser(description="""
     Does stuff like installing Gapps, installing Magisk, installing NDK Translation and getting Android ID for device registration.
-    Use -h  flag for help!''')
+    Use -h flag for help!""")
 
-    subparsers = parser.add_subparsers(title="coomand", dest='command')
+    subparsers = parser.add_subparsers(title="command", dest="command")
     parser.add_argument('-a', '--android-version',
                         dest='android_version',
                         help='Specify the Android version',
@@ -298,55 +314,51 @@ def main():
     install_choices = ["gapps", "microg", "libndk", "libhoudini",
                        "magisk", "mitm", "smartdock", "widevine"]
     hack_choices = ["nodataperm", "hidestatusbar"]
-    micrg_variants = ["Standard", "NoGoolag", "UNLP", "Minimal", "MinimalIAP"]
-    remove_choices = install_choices
-
     arg_template = {
         "dest": "app",
         "type": str,
         "nargs": '+',
-        # "metavar":"",
     }
 
     install_help = """
 gapps: Install Open GApps (Android 11) or MindTheGapps (Android 13)
-microg: Add microG, Aurora Store and Aurora Droid to WayDriod
+microg: Add microG, Aurora Store and Aurora Droid to WayDroid
 libndk: Add libndk arm translation, better for AMD CPUs
 libhoudini: Add libhoudini arm translation, better for Intel CPUs
 magisk: Install Magisk Delta to WayDroid
 mitm -c CA_CERT_FILE: Install root CA cert into system trust store
 smartdock: A desktop mode launcher for Android
-widevine: Add support for widevine DRM L3
-    """
-    # install and its aliases
+widevine: Add support for Widevine DRM L3
+"""
     install_parser = subparsers.add_parser(
         'install', formatter_class=argparse.RawTextHelpFormatter, help='Install an app')
-    install_parser.add_argument(
-        **arg_template, choices=install_choices, help=install_help)
-    install_parser.add_argument('-c', '--ca-cert',
-                                dest='ca_cert_file',
+    install_parser.add_argument(**arg_template, choices=install_choices, help=install_help)
+    install_parser.add_argument('-c', '--ca-cert', dest='ca_cert_file',
                                 help='[for mitm only] The CA certificate file (*.pem) to install',
                                 default=None)
     install_parser.set_defaults(func=install_app)
 
-    # remove and its aliases
-    remove_parser = subparsers.add_parser(
-        'remove', aliases=["uninstall"], help='Remove an app')
-    remove_parser.add_argument(
-        **arg_template, choices=[*remove_choices, * hack_choices], help='Name of app to remove')
+    remove_parser = subparsers.add_parser('remove', aliases=["uninstall"], help='Remove an app')
+    remove_parser.add_argument(**arg_template, choices=[*install_choices, *hack_choices], help='Name of app to remove')
     remove_parser.set_defaults(func=remove_app)
 
-    # hack and its aliases
     hack_parser = subparsers.add_parser('hack', help='Hack the system')
-    hack_parser.add_argument(
-        'option_name', nargs="+", choices=hack_choices, help='Name of hack option')
+    hack_parser.add_argument('option_name', nargs="+", choices=hack_choices, help='Name of hack option')
     hack_parser.set_defaults(func=hack_option)
+
+    audio_parser = subparsers.add_parser(
+        "audio24", help="Manage the optional host 24-bit PCM audio override")
+    audio_parser.add_argument("action", choices=["enable", "disable", "status"])
+    audio_parser.set_defaults(func=lambda args: {
+        "enable": lambda: enable_24bit_audio(),
+        "disable": lambda: disable_24bit_audio(),
+        "status": lambda: status_24bit_audio(),
+    }[args.action]())
 
     args = parser.parse_args()
     args.microg_variant = "Standard"
     if hasattr(args, 'func'):
-        args_dict = vars(args)
-        helper.check_root()
+        helper.check_root() if args.command not in ("audio24",) else None
         args.func(args)
     else:
         helper.check_root()
