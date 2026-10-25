@@ -6,7 +6,7 @@ Script to add GApps and other stuff to Waydroid!
 
 ## Interactive terminal interface
 
-```
+```bash
 git clone https://github.com/casualsnek/waydroid_script
 cd waydroid_script
 python3 -m venv venv
@@ -35,100 +35,114 @@ sudo venv/bin/python3 main.py uninstall {gapps, magisk, libndk, libhoudini, noda
 sudo venv/bin/python3 main.py certified
 # some hacks
 sudo venv/bin/python3 main.py hack {nodataperm, hidestatusbar}
-# high-resolution audio configuration
+# check, install or undo high-resolution audio support
 sudo venv/bin/python3 main.py highres-audio status
 sudo venv/bin/python3 main.py highres-audio enable
 sudo venv/bin/python3 main.py highres-audio disable
 ```
 
-## High-resolution / 24-bit audio
+## Waydroid high-resolution audio
 
-Waydroid's stock Android Audio HAL currently opens its playback stream at 48 kHz with signed 16-bit PCM, and its audio policy XML advertises a primary output profile of 16-bit/48 kHz. This is an Android-side limitation: changing PipeWire's default sample format alone does not make the Android HAL send 24-bit audio. See the [Waydroid Audio HAL source](https://github.com/waydroid/android_hardware_waydroid/blob/lineage-20/audio/audio_hw.c) and [audio policy configuration](https://github.com/waydroid/android_hardware_waydroid/blob/lineage-20/audio/audio_policy_configuration.xml).
+Stock Waydroid's audio HAL opens its output path at 16-bit/48 kHz. The primary output profile in its audio-policy XML also advertises only 16-bit/48 kHz. This is an Android-side limitation: changing PipeWire settings by itself cannot make the stock HAL send higher-resolution PCM. See the [Waydroid HAL source](https://github.com/waydroid/android_hardware_waydroid/blob/lineage-20/audio/audio_hw.c) and [audio policy XML](https://github.com/waydroid/android_hardware_waydroid/blob/lineage-20/audio/audio_policy_configuration.xml).
 
-The `highres-audio` helper currently supports status inspection and a reversible policy-only experiment for systems using Waydroid overlayfs. The policy-only mode is **not a complete fix** and can cause audio initialization failures if the installed HAL does not accept the advertised formats. The helper intentionally does not download or replace a precompiled HAL automatically: a HAL must match your installed Android image/branch and CPU architecture.
+This script includes a **strictly checksum-guarded 32-bit/192 kHz patch** adapted from the MIT-licensed [waydroid-apple-music project](https://github.com/willbeez/waydroid-apple-music). It extracts the HAL and policy files from your locally installed `vendor.img`, validates each known source SHA-256, applies fixed byte edits, validates each patched SHA-256, and only then stages an overlay. It does not download a HAL binary from the internet.
 
-For a complete fix, use a source-built HAL that supports the required PCM formats and sample rates, update the Android audio policy consistently, and validate on the host audio server and DAC. Bit-perfect output additionally depends on Android's routing/mixer behavior, application support, PipeWire negotiation, and your physical audio device. A stream reporting S24/F32 in one layer does not by itself prove bit-perfect output end to end.
+**Compatibility is currently limited to one tested x86_64 Android 13 MAINLINE GAPPS vendor image.** If your `vendor.img` or audio policy differs from the expected checksums, the patch refuses to make changes. Do not bypass these checks or use binary offsets on another image. Add support for a new image only after verifying its unpatched and patched binaries against the correct Waydroid branch and architecture.
 
-**Do not enable policy-only mode on a system you rely on for audio.** It is an explicit advanced/testing option from the CLI:
+The command preserves any existing overlay files and the original `mount_overlays` setting. It records rollback state, refuses to overwrite an existing patch state, stops Waydroid before changing files, and offers a restore command. The helper enables Waydroid's overlay configuration if needed; when disabling, it restores the prior value only if the setting has not been changed by you since installation.
 
 ```bash
-sudo venv/bin/python3 main.py highres-audio enable --policy-only
+# Check whether the local files/config are present
 sudo venv/bin/python3 main.py highres-audio status
+
+# Install the checksum-verified patch; supported images only
+sudo venv/bin/python3 main.py highres-audio enable
+
+# Restore the files and overlay setting saved before installation
 sudo venv/bin/python3 main.py highres-audio disable
 ```
 
+### What this patch does—and does not do
+
+On the supported image, the patch changes the Waydroid audio link to 32-bit PCM at 192 kHz. It is intended to preserve high-resolution sample data through the host audio bridge. It does **not** guarantee bit-perfect playback: Android's mixer/routing, the Android app, PipeWire's graph/rate negotiation, and the actual output device still affect the final signal. Bluetooth output may resample or use a lossy codec. A stream reported as `S32LE 192000` is useful evidence, but by itself is not proof of bit-perfect end-to-end output.
+
+After installation, restart or reopen playback and inspect the host graph with `pw-top` or `pw-cli`. Confirm the actual stream format and rate, and check the rate/format supported by your DAC. The patch does not force a global PipeWire clock rate because that would affect all audio on the desktop; users who need a fixed 192 kHz graph should set up and test that separately with a reversible PipeWire drop-in.
+
+This is an opt-in experimental patch. Keep a backup of your Waydroid data and restore the original audio overlay before updating/reinitializing Waydroid. If your system is not the tested image, the intended result is a clear refusal—not a partially patched audio HAL.
+
 ## Dependencies
 
-"lzip" is required for this script to work, install it using your distribution's package manager:
-### Arch, Manjaro and EndeavourOS based distributions:
-    sudo pacman -S lzip
-### Debian and Ubuntu based distributions:
-    sudo apt install lzip
-### RHEL, Fedora and Rocky based distributions:
-    sudo dnf install lzip
-### openSUSE based distributions:
-    sudo zypper install lzip
+`lzip` is required for this script to work. Install it using your distribution's package manager:
+
+### Arch, Manjaro and EndeavourOS based distributions
+
+```bash
+sudo pacman -S lzip e2fsprogs
+```
+
+### Debian and Ubuntu based distributions
+
+```bash
+sudo apt install lzip e2fsprogs
+```
+
+### RHEL, Fedora and Rocky based distributions
+
+```bash
+sudo dnf install lzip e2fsprogs
+```
+
+### openSUSE based distributions
+
+```bash
+sudo zypper install lzip e2fsprogs
+```
 
 ## Install OpenGapps
 
 ![](assets/1.png)
 
-Open terminal and switch to the directory where "main.py" is located then run:
+Open terminal and switch to the directory where `main.py` is located, then run:
 
     sudo venv/bin/python3 main.py install gapps
 
-Then launch waydroid with:
+Then launch Waydroid with:
 
     waydroid show-full-ui
 
-After waydroid has finished booting, open terminal and switch to the directory where "main.py" is located then run:
+After Waydroid has finished booting, open a terminal in the directory where `main.py` is located and run:
 
     sudo python3 main.py google
-Copy the returned numeric ID, then open ["https://google.com/android/uncertified/?pli=1"](https://google.com/android/uncertified/?pli=1). Enter the ID and register it. Wait 10-20 minutes for device to get registered. Then clear Google Play Service's cache and try logging in!
+
+Copy the returned numeric ID, then open [Google's uncertified-device page](https://google.com/android/uncertified/?pli=1). Enter the ID and register it. Wait 10–20 minutes for the device to be registered. Then clear Google Play Services' cache and try logging in.
 
 ## Install Magisk
 
 ![](assets/2.png)
 
-Open terminal and switch to the directory where "main.py" is located then run:
-
     sudo venv/bin/python3 main.py install magisk
 
-Magisk will be installed on next boot!
+Magisk will be installed on the next boot. Zygisk and modules like LSPosed should work now.
 
-Zygisk and modules like LSPosed should work now.
+If you want to update Magisk, use `Direct Install into system partition` or run this script again.
 
-If you want to update Magisk, Please use `Direct Install into system partition` or run this script again.
+This script only focuses on Magisk installation. For more management, see https://github.com/nitanmarcel/waydroid-magisk.
 
-This script only focuses on Magisk installation, if you need more management, please check https://github.com/nitanmarcel/waydroid-magisk
+## Install libndk ARM translation
 
-## Install libndk arm translation
-
-libndk_translation from guybrush firmware.
-
-libndk seems to have better performance than libhoudini on AMD.
-
-Open terminal and switch to the directory where "main.py" is located then run:
+libndk_translation from Guybrush firmware. It can offer better performance than libhoudini on some AMD systems.
 
     sudo venv/bin/python3 main.py install libndk
 
-## Install libhoudini arm translation
+## Install libhoudini ARM translation
 
-Intel's libhoudini for intel/AMD x86 CPU, pulled from Microsoft's WSA 11 image
-
-houdini version: 11.0.1b_y.38765.m
-
-houdini64 version: 11.0.1b_z.38765.m
-
-Open terminal and switch to the directory where "main.py" is located then run:
+Intel's libhoudini for Intel/AMD x86 CPUs, pulled from Microsoft's WSA 11 image.
 
     sudo venv/bin/python3 main.py install libhoudini
 
 ## Integrate Widevine DRM (L3)
 
 ![](assets/3.png)
-
-Open terminal and switch to the directory where "main.py" is located then run:
 
     sudo venv/bin/python3 main.py install widevine
 
@@ -137,34 +151,31 @@ Open terminal and switch to the directory where "main.py" is located then run:
 ![](assets/4.png)
 ![](assets/5.png)
 
-Open terminal and switch to the directory where "main.py" is located then run:
-
     sudo venv/bin/python3 main.py install smartdock
 
 ## Install a self-signed CA certificate
-
-Open terminal and switch to the directory where "main.py" is located then run:
 
     sudo venv/bin/python3 main.py install mitm --ca-cert mycert.pem
 
 ## Granting full permission for apps data (HACK)
 
-This is a temporary hack to combat against the Android 11 apps permission issue. Whenever an app is open it will always enable a property (persist.sys.nodataperm) to make it execute a script to grant the data full permissions (777). The **correct** way is to use `sdcardfs` or `esdfs`, both need to recompile the kernel or WayDroid image.
-
-Arknights, PUNISHING: GRAY RAVEN and other games won't freeze on the black screen.
+This is a temporary hack to combat against the apps permission issue on Android 11. Whenever an app is open it enables a property (`persist.sys.nodataperm`) to execute a script that grants full data permissions (777). The correct fix is to use `sdcardfs` or `esdfs`, which require kernel or Waydroid image changes.
 
 ![](assets/6.png)
 
-Open terminal and switch to the directory where "main.py" is located then run:
-
-```
+```bash
 sudo venv/bin/python3 main.py hack nodataperm
 ```
-**WARNING**: Tested on `lineage-18.1-20230128-VANILLA-waydroid_x86_64.img`. This script will replace `/system/framework/service.jar`, which may prevent Waydroid from booting. If so, run `sudo venv/bin/python3 main.py uninstall nodataperm` to remove it.
 
-Or you can run the following commands directly in `sudo waydroid shell`. In this way, every time a new game is installed, you need to run it again, but it's much less risky.
+**WARNING:** Tested on `lineage-18.1-20230128-VANILLA-waydroid_x86_64.img`. This replaces `/system/framework/service.jar` and may prevent Waydroid from booting. If that happens, run:
 
+```bash
+sudo venv/bin/python3 main.py uninstall nodataperm
 ```
+
+Alternatively, run the commands below in `sudo waydroid shell`. They may need to be repeated when installing new games, but are less invasive than replacing `service.jar`.
+
+```bash
 chmod 777 -R /sdcard/Android
 chmod 777 -R /data/media/0/Android
 chmod 777 -R /sdcard/Android/data
@@ -180,38 +191,42 @@ chmod 777 -R /mnt/*/*/*/*/Android/obb
 
 ![](assets/7.png)
 
-```
+```bash
 sudo venv/bin/python3 main.py install microg
 ```
 
 ## Hide Status Bar
 
-Before
+Before:
+
 ![Before](assets/8.png)
 
-After
+After:
+
 ![After](assets/9.png)
 
-```
+```bash
 sudo venv/bin/python3 main.py hack hidestatusbar
 ```
 
 ## Get Android ID for device registration
 
-You need to register your device with its ID before being able to use GApps. This prints the Android ID used for registration required for Google apps. Open terminal and switch to the directory where "main.py" is located then run:
-
     sudo venv/bin/python3 main.py certified
 
-Star this repository if you find this useful, if you encounter problem create an issue on GitHub!
+Register the printed Android ID before using Google apps on an uncertified image.
+
+Star this repository if you find it useful. If you encounter a problem, create a GitHub issue.
 
 ## Error handling
 
 - Magisk installed: N/A
 
-Check [waydroid-magisk](https://github.com/nitanmarcel/waydroid-magisk)
+Check [waydroid-magisk](https://github.com/nitanmarcel/waydroid-magisk).
 
 ## Credits
-- [WayDroid](https://github.com/waydroid/waydroid)
+
+- [Waydroid](https://github.com/waydroid/waydroid)
+- [MIT-licensed high-resolution patch recipe](https://github.com/willbeez/waydroid-apple-music)
 - [Magisk Delta](https://huskydg.github.io/magisk-files/)
 - [microG Project](https://microg.org)
 - [Open GApps](https://opengapps.org)
