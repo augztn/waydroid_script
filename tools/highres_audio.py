@@ -235,9 +235,10 @@ def _set_overlay_config(value: str | None) -> None:
 
 def _install_overlay(staged_root: Path, manifest: dict[str, str]) -> dict[str, Any]:
     """Back up existing overlay files and atomically install verified outputs."""
-    current = _read_state()
-    if current is not None:
-        raise RuntimeError(f"Audio patch state already exists at {STATE_PATH}; run disable or inspect backups")
+    if STATE_DIR.exists():
+        raise RuntimeError(
+            f"Audio patch state/backups already exist at {STATE_DIR}; inspect or restore them before retrying"
+        )
 
     BACKUP_DIR.mkdir(parents=True, exist_ok=True)
     file_state: dict[str, dict[str, Any]] = {}
@@ -250,6 +251,8 @@ def _install_overlay(staged_root: Path, manifest: dict[str, str]) -> dict[str, A
         existed = destination.is_file()
         if destination.exists() and not destination.is_file():
             raise RuntimeError(f"Refusing to replace non-file overlay entry: {destination}")
+        if backup.exists():
+            raise RuntimeError(f"Backup path already exists; refusing to overwrite it: {backup}")
         if existed:
             shutil.copy2(destination, backup)
         file_state[relative] = {
@@ -321,6 +324,15 @@ def _install_overlay(staged_root: Path, manifest: dict[str, str]) -> dict[str, A
 
 
 def _stop_container() -> None:
+    # Stop the session first so overlay files cannot be open in a mounted rootfs.
+    subprocess.run(
+        ["waydroid", "session", "stop"],
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+        timeout=30,
+    )
     result = subprocess.run(
         ["waydroid", "container", "stop"],
         text=True,
@@ -331,7 +343,6 @@ def _stop_container() -> None:
     )
     if result.returncode:
         detail = (result.stderr or result.stdout).strip()
-        # Stop can return non-zero if already stopped, but verify actual state.
         status = subprocess.run(
             ["waydroid", "status"], text=True, stdout=subprocess.PIPE,
             stderr=subprocess.PIPE, check=False, timeout=15
@@ -361,6 +372,10 @@ def enable() -> None:
         raise RuntimeError("waydroid command not found")
     if not shutil.which("debugfs"):
         raise RuntimeError("debugfs is required; install e2fsprogs")
+    if STATE_DIR.exists():
+        raise RuntimeError(
+            f"Audio patch state/backups already exist at {STATE_DIR}; inspect or restore them before retrying"
+        )
 
     image = _vendor_image_path()
     with tempfile.TemporaryDirectory(prefix="waydroid-highres-audio-") as temp_dir:
@@ -393,33 +408,46 @@ def disable() -> None:
         raise RuntimeError(f"Audio patch state is incomplete. Inspect backups at {BACKUP_DIR}")
 
     _stop_container()
-    changed_paths: list[str] = []
     skipped_paths: list[str] = []
     for relative, item in payload["files"].items():
         destination = Path(item["destination"])
-        if not destination.exists():
-            skipped_paths.append(f"{destination} (removed externally)")
+        backup = Path(item["backup"]) if item.get("backup") else None
+        if item["existed"] and backup and backup.is_file():
+            original_hash = sha256(backup.read_bytes())
+        else:
+            original_hash = None
+
+        if item["existed"] and original_hash is not None and destination.is_file():
+            if sha256(destination.read_bytes()) == original_hash:
+                # Already restored during a previous partial run.
+                continue
+        elif not item["existed"] and not destination.exists():
+            # Already removed during a previous partial run.
             continue
+
         if not destination.is_file() or sha256(destination.read_bytes()) != item["patched_sha256"]:
-            skipped_paths.append(f"{destination} (changed since installation)")
+            skipped_paths.append(f"{destination} (changed or removed externally)")
             continue
         try:
             if item["existed"]:
-                backup_text = item.get("backup")
-                if not backup_text or not Path(backup_text).is_file():
+                if not backup or not backup.is_file():
                     raise RuntimeError(f"Required backup is missing for {destination}")
-                shutil.copy2(Path(backup_text), destination)
+                shutil.copy2(backup, destination)
             else:
                 destination.unlink()
-            changed_paths.append(str(destination))
         except OSError as exc:
             raise RuntimeError(f"Could not restore {destination}: {exc}") from exc
 
     config_state = payload.get("config", {})
     current = _config().get("waydroid", "mount_overlays", fallback=None)
-    if current == config_state.get("mount_overlays_applied"):
-        if config_state.get("mount_overlays_present") and config_state.get("mount_overlays_previous") is not None:
-            _set_overlay_config(config_state["mount_overlays_previous"])
+    previous_present = config_state.get("mount_overlays_present", False)
+    previous_value = config_state.get("mount_overlays_previous")
+    if current == previous_value and bool(previous_present) == (previous_value is not None):
+        # The original value is already restored.
+        pass
+    elif current == config_state.get("mount_overlays_applied"):
+        if previous_present and previous_value is not None:
+            _set_overlay_config(previous_value)
         else:
             _set_overlay_config(None)
     else:
