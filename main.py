@@ -282,14 +282,19 @@ def interact():
         audio_action = inquirer.select(
             message="High-resolution audio configuration",
             choices=[
-                Choice(name="Enable policy-only profile (testing; may break audio)", value="enable"),
+                Choice(name="Check status", value="status"),
+                Choice(name="Enable policy-only test (can break audio)", value="enable"),
                 Choice(name="Restore original audio policy", value="disable"),
-                Choice(name="Show status", value="status"),
                 Choice(name="Back / exit", value=None),
             ],
         ).execute()
         if audio_action == "enable":
-            enable_highres_audio(policy_only=True)
+            confirmed = inquirer.confirm(
+                message="WARNING: policy-only mode does not patch the HAL and may break audio. Continue?",
+                default=False,
+            ).execute()
+            if confirmed:
+                enable_highres_audio(policy_only=True)
         elif audio_action == "disable":
             disable_highres_audio()
         elif audio_action == "status":
@@ -301,15 +306,16 @@ def interact():
 def main():
     parser = argparse.ArgumentParser(description='''
     Does stuff like installing Gapps, installing Magisk, installing NDK Translation and getting Android ID for device registration.
-    Use -h flag for help!''')
+    Use -h  flag for help!''')
 
-    subparsers = parser.add_subparsers(title="command", dest='command')
+    subparsers = parser.add_subparsers(title="coomand", dest='command')
     parser.add_argument('-a', '--android-version',
                         dest='android_version',
                         help='Specify the Android version',
                         default="13",
                         choices=["11", "13"])
 
+    # android command
     certified = subparsers.add_parser(
         'certified', help='Get device ID to obtain Play Store certification')
     certified.set_defaults(func=get_certified)
@@ -324,6 +330,7 @@ def main():
         "dest": "app",
         "type": str,
         "nargs": '+',
+        # "metavar":"",
     }
 
     install_help = """
@@ -336,6 +343,7 @@ mitm -c CA_CERT_FILE: Install root CA cert into system trust store
 smartdock: A desktop mode launcher for Android
 widevine: Add support for widevine DRM L3
     """
+    # install and its aliases
     install_parser = subparsers.add_parser(
         'install', formatter_class=argparse.RawTextHelpFormatter, help='Install an app')
     install_parser.add_argument(
@@ -346,11 +354,13 @@ widevine: Add support for widevine DRM L3
                                 default=None)
     install_parser.set_defaults(func=install_app)
 
+    # remove and its aliases
     remove_parser = subparsers.add_parser('remove', aliases=["uninstall"], help='Remove an app')
     remove_parser.add_argument(
-        **arg_template, choices=[*remove_choices, *hack_choices], help='Name of app to remove')
+        **arg_template, choices=[*remove_choices, * hack_choices], help='Name of app to remove')
     remove_parser.set_defaults(func=remove_app)
 
+    # hack and its aliases
     hack_parser = subparsers.add_parser('hack', help='Hack the system')
     hack_parser.add_argument(
         'option_name', nargs="+", choices=hack_choices, help='Name of hack option')
