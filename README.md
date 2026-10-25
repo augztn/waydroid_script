@@ -51,7 +51,7 @@ sudo venv/bin/python3 main.py highres-audio disable
 
 Waydroid's stock audio HAL uses a 16-bit/48 kHz output path, which means a host PipeWire format change alone cannot expose higher-resolution PCM. This script includes a **strict checksum-guarded 32-bit/192 kHz patch** adapted from the MIT-licensed [waydroid-apple-music project](https://github.com/willbeez/waydroid-apple-music).
 
-The helper extracts the HAL and policy files from your local `vendor.img`, verifies the exact source SHA-256 values, applies known binary edits, verifies the patched hashes, and installs them into Waydroid's overlay. It does not download a precompiled HAL.
+The helper extracts the HAL and policy files from your local `vendor.img`, verifies the exact source SHA-256 values, applies known binary edits, verifies the patched hashes, and installs them into Waydroid's overlay. It does not download a precompiled HAL. It requires `debugfs` from the `e2fsprogs` package.
 
 **Compatibility is currently limited to one tested x86_64 Android 13 MAINLINE GAPPS vendor image.** If your local image differs, the helper refuses to modify anything. Do not remove the checks or apply binary offsets to other builds.
 
