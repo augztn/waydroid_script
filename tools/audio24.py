@@ -28,7 +28,7 @@ def _run(args: Iterable[str], *, check: bool = True) -> subprocess.CompletedProc
     )
 
 
-def _desktop_user() -> tuple[Path, int]:
+def _desktop_user() -> tuple[Path, int, int]:
     """Resolve the actual desktop user when the caller invoked the script via sudo."""
     sudo_user = os.environ.get("SUDO_USER")
     if sudo_user:
@@ -37,8 +37,8 @@ def _desktop_user() -> tuple[Path, int]:
             record = pwd.getpwnam(sudo_user)
         except KeyError as exc:
             raise RuntimeError(f"Cannot resolve invoking user {sudo_user!r}") from exc
-        return Path(record.pw_dir), record.pw_uid
-    return Path.home(), os.getuid()
+        return Path(record.pw_dir), record.pw_uid, record.pw_gid
+    return Path.home(), os.getuid(), os.getgid()
 
 
 def _restart_user_audio(uid: int) -> None:
@@ -49,6 +49,11 @@ def _restart_user_audio(uid: int) -> None:
         return
 
     runtime_dir = Path(f"/run/user/{uid}")
+    if not runtime_dir.is_dir():
+        print("Configuration written; the desktop user's session is not active for automatic restart.")
+        print("Restart your user audio service or log out and back in to apply it.")
+        return
+
     env = os.environ.copy()
     env["XDG_RUNTIME_DIR"] = str(runtime_dir)
     bus = runtime_dir / "bus"
@@ -61,13 +66,22 @@ def _restart_user_audio(uid: int) -> None:
         timeout=15, check=False,
     )
     if result.returncode:
-        # PulseAudio-only or non-systemd desktops are valid; don't claim restart.
         print("Configuration written, but PipeWire PulseAudio could not be restarted automatically.")
         print("Restart your user audio service or log out and back in to apply it.")
 
 
+def _require_pipewire(home: Path) -> None:
+    """Avoid writing a PipeWire-specific drop-in on PulseAudio-only systems."""
+    if not (home / ".config" / "pipewire").is_dir() and not shutil.which("pipewire"):
+        raise RuntimeError(
+            "PipeWire was not detected. This command configures PipeWire's "
+            "PulseAudio-compatible server, not standalone PulseAudio."
+        )
+
+
 def enable() -> None:
-    home, uid = _desktop_user()
+    home, uid, gid = _desktop_user()
+    _require_pipewire(home)
     config_dir = home / ".config" / "pipewire" / "pipewire-pulse.conf.d"
     config_file = config_dir / "90-waydroid-24bit.conf"
     backup = config_file.with_name(config_file.name + BACKUP_SUFFIX)
@@ -83,11 +97,9 @@ def enable() -> None:
             shutil.copy2(config_file, backup)
 
     config_file.write_text(CONFIG_CONTENT, encoding="utf-8")
-    if os.geteuid() == 0 and os.environ.get("SUDO_USER"):
-        import pwd
-        record = pwd.getpwnam(os.environ["SUDO_USER"])
-        os.chown(config_file, record.pw_uid, record.pw_gid)
-        os.chown(config_dir, record.pw_uid, record.pw_gid)
+    if os.geteuid() == 0:
+        os.chown(config_file, uid, gid)
+        os.chown(config_dir, uid, gid)
 
     print(f"Wrote host audio configuration: {config_file}")
     print("This requests 24-bit PCM at the host audio layer; it does not prove end-to-end 24-bit playback.")
@@ -95,7 +107,7 @@ def enable() -> None:
 
 
 def disable() -> None:
-    home, uid = _desktop_user()
+    home, uid, _gid = _desktop_user()
     config_file = home / ".config" / "pipewire" / "pipewire-pulse.conf.d" / "90-waydroid-24bit.conf"
     backup = config_file.with_name(config_file.name + BACKUP_SUFFIX)
 
@@ -105,6 +117,10 @@ def disable() -> None:
 
     if backup.exists():
         shutil.copy2(backup, config_file)
+        if os.geteuid() == 0:
+            import pwd
+            _record = pwd.getpwuid(uid)
+            os.chown(config_file, _record.pw_uid, _record.pw_gid)
         backup.unlink()
         print(f"Restored previous configuration: {config_file}")
     else:
@@ -114,7 +130,7 @@ def disable() -> None:
 
 
 def status() -> None:
-    home, _uid = _desktop_user()
+    home, _uid, _gid = _desktop_user()
     config_file = home / ".config" / "pipewire" / "pipewire-pulse.conf.d" / "90-waydroid-24bit.conf"
     print("24-bit host audio override is enabled." if config_file.exists() else
           "24-bit host audio override is not enabled by this script.")
