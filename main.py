@@ -294,7 +294,11 @@ def interact():
                 default=False,
             ).execute()
             if confirmed:
-                enable_highres_audio()
+                use_pipewire_192k = inquirer.confirm(
+                    message="Also pin the host PipeWire graph to 192 kHz? This affects all desktop audio and may resample other apps.",
+                    default=False,
+                ).execute()
+                enable_highres_audio(host_pipewire_192k=use_pipewire_192k)
         elif audio_action == "disable":
             disable_highres_audio()
         elif audio_action == "status":
@@ -365,8 +369,13 @@ widevine: Add support for widevine DRM L3
     audio_parser = subparsers.add_parser(
         "highres-audio", help="Manage the checksum-guarded Waydroid high-resolution audio patch")
     audio_parser.add_argument("action", choices=["enable", "disable", "status"])
+    audio_parser.add_argument(
+        "--host-pipewire-192k",
+        action="store_true",
+        help="Also pin the host PipeWire graph to 192 kHz (affects all desktop audio)",
+    )
     audio_parser.set_defaults(func=lambda args: {
-        "enable": lambda: enable_highres_audio(),
+        "enable": lambda: enable_highres_audio(host_pipewire_192k=args.host_pipewire_192k),
         "disable": lambda: disable_highres_audio(),
         "status": lambda: status_highres_audio(),
     }[args.action]())
