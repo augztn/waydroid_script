@@ -226,6 +226,7 @@ def _overlay_path(relative: str) -> Path:
 
 def _set_overlay_config(value: str | None) -> None:
     cfg = _config()
+    original_stat = CONFIG_PATH.stat()
     if value is None:
         cfg.remove_option("waydroid", "mount_overlays")
     else:
@@ -238,6 +239,8 @@ def _set_overlay_config(value: str | None) -> None:
             cfg.write(stream, space_around_delimiters=True)
             stream.flush()
             os.fsync(stream.fileno())
+        temp_path.chmod(original_stat.st_mode & 0o777)
+        os.chown(temp_path, original_stat.st_uid, original_stat.st_gid)
         os.replace(temp_path, CONFIG_PATH)
     except Exception:
         temp_path.unlink(missing_ok=True)
@@ -550,7 +553,17 @@ def enable(host_pipewire_192k: bool = False) -> None:
         # its config/overlay. Unsupported vendor images fail without side effects.
         manifest = build_overlay(image, staged_root)
         _stop_container()
-        _install_overlay(staged_root, manifest, pipewire_info)
+        try:
+            _install_overlay(staged_root, manifest, pipewire_info)
+        except Exception:
+            # If rollback completed, bring the container back rather than leave
+            # the user's Waydroid session stopped after a failed operation.
+            if not STATE_PATH.exists():
+                try:
+                    _reload_waydroid()
+                except Exception as restart_error:
+                    print(f"WARNING: install failed and Waydroid could not be restarted: {restart_error}")
+            raise
 
     try:
         _reload_waydroid()
