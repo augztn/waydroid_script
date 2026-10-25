@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import hashlib
 import importlib.util
+import os
 from pathlib import Path
 import tempfile
 import unittest
@@ -67,6 +68,58 @@ class HighResPatcherTests(unittest.TestCase):
             MODULE.POLICY_NEW = original_new
             MODULE.POLICY_SOURCE_SHA256 = original_source_hash
             MODULE.POLICY_PATCHED_SHA256 = original_patched_hash
+
+    def test_pipewire_dropin_restore_preserves_existing_file_metadata(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            original = b"# previous user configuration\n"
+            backup = root / "pipewire.bak"
+            backup.write_bytes(original)
+            backup.chmod(0o600)
+            destination = root / "99-waydroid-script-highres.conf"
+            destination.write_text(MODULE.PIPEWIRE_CONTENT, encoding="utf-8")
+            destination.chmod(0o644)
+            info = {
+                "path": str(destination),
+                "backup": str(backup),
+                "existed": True,
+                "installed_sha256": digest(MODULE.PIPEWIRE_CONTENT.encode("utf-8")),
+                "uid": os.getuid(),
+                "gid": os.getgid(),
+                "original_uid": os.getuid(),
+                "original_gid": os.getgid(),
+                "original_mode": 0o600,
+            }
+            self.assertTrue(MODULE._restore_pipewire_dropin(info))
+            self.assertEqual(destination.read_bytes(), original)
+            self.assertEqual(destination.stat().st_mode & 0o777, 0o600)
+
+    def test_pipewire_restore_leaves_user_modified_dropin_alone(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            destination = root / "99-waydroid-script-highres.conf"
+            destination.write_text("user changed this file\n", encoding="utf-8")
+            info = {
+                "path": str(destination),
+                "backup": None,
+                "existed": False,
+                "installed_sha256": digest(MODULE.PIPEWIRE_CONTENT.encode("utf-8")),
+            }
+            self.assertFalse(MODULE._restore_pipewire_dropin(info))
+            self.assertEqual(destination.read_text(encoding="utf-8"), "user changed this file\n")
+
+    def test_pipewire_restore_removes_new_dropin(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            destination = Path(temp) / "99-waydroid-script-highres.conf"
+            destination.write_text(MODULE.PIPEWIRE_CONTENT, encoding="utf-8")
+            info = {
+                "path": str(destination),
+                "backup": None,
+                "existed": False,
+                "installed_sha256": digest(MODULE.PIPEWIRE_CONTENT.encode("utf-8")),
+            }
+            self.assertTrue(MODULE._restore_pipewire_dropin(info))
+            self.assertFalse(destination.exists())
 
     def test_build_overlay_rejects_unknown_image_before_writing(self) -> None:
         original_files = MODULE.FILES
