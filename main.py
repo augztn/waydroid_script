@@ -18,6 +18,9 @@ from stuff.nodataperm import Nodataperm
 from stuff.smartdock import Smartdock
 from stuff.widevine import Widevine
 from stuff.fdroidpriv import FDroidPriv
+from tools.highres_audio import enable as enable_highres_audio
+from tools.highres_audio import disable as disable_highres_audio
+from tools.highres_audio import status as status_highres_audio
 import tools.helper as helper
 from tools import container
 from tools import images
@@ -221,6 +224,7 @@ def interact():
             "Install",
             "Remove",
             "Hack",
+            "Configure high-resolution audio",
             "Get Google Device ID to Get Certified"
         ],
         instruction="([↑↓]: Select Item)",
@@ -274,6 +278,22 @@ def interact():
         ).execute()
         args.option_name = apps
         hack_option(args)
+    elif action == "Configure high-resolution audio":
+        audio_action = inquirer.select(
+            message="High-resolution audio configuration",
+            choices=[
+                Choice(name="Enable policy-only profile (testing; may break audio)", value="enable"),
+                Choice(name="Restore original audio policy", value="disable"),
+                Choice(name="Show status", value="status"),
+                Choice(name="Back / exit", value=None),
+            ],
+        ).execute()
+        if audio_action == "enable":
+            enable_highres_audio(policy_only=True)
+        elif audio_action == "disable":
+            disable_highres_audio()
+        elif audio_action == "status":
+            status_highres_audio()
     elif action == "Get Google Device ID to Get Certified":
         AndroidId().get_id()
 
@@ -281,16 +301,15 @@ def interact():
 def main():
     parser = argparse.ArgumentParser(description='''
     Does stuff like installing Gapps, installing Magisk, installing NDK Translation and getting Android ID for device registration.
-    Use -h  flag for help!''')
+    Use -h flag for help!''')
 
-    subparsers = parser.add_subparsers(title="coomand", dest='command')
+    subparsers = parser.add_subparsers(title="command", dest='command')
     parser.add_argument('-a', '--android-version',
                         dest='android_version',
                         help='Specify the Android version',
                         default="13",
                         choices=["11", "13"])
 
-    # android command
     certified = subparsers.add_parser(
         'certified', help='Get device ID to obtain Play Store certification')
     certified.set_defaults(func=get_certified)
@@ -305,7 +324,6 @@ def main():
         "dest": "app",
         "type": str,
         "nargs": '+',
-        # "metavar":"",
     }
 
     install_help = """
@@ -318,7 +336,6 @@ mitm -c CA_CERT_FILE: Install root CA cert into system trust store
 smartdock: A desktop mode launcher for Android
 widevine: Add support for widevine DRM L3
     """
-    # install and its aliases
     install_parser = subparsers.add_parser(
         'install', formatter_class=argparse.RawTextHelpFormatter, help='Install an app')
     install_parser.add_argument(
@@ -329,23 +346,30 @@ widevine: Add support for widevine DRM L3
                                 default=None)
     install_parser.set_defaults(func=install_app)
 
-    # remove and its aliases
-    remove_parser = subparsers.add_parser(
-        'remove', aliases=["uninstall"], help='Remove an app')
+    remove_parser = subparsers.add_parser('remove', aliases=["uninstall"], help='Remove an app')
     remove_parser.add_argument(
-        **arg_template, choices=[*remove_choices, * hack_choices], help='Name of app to remove')
+        **arg_template, choices=[*remove_choices, *hack_choices], help='Name of app to remove')
     remove_parser.set_defaults(func=remove_app)
 
-    # hack and its aliases
     hack_parser = subparsers.add_parser('hack', help='Hack the system')
     hack_parser.add_argument(
         'option_name', nargs="+", choices=hack_choices, help='Name of hack option')
     hack_parser.set_defaults(func=hack_option)
 
+    audio_parser = subparsers.add_parser(
+        "highres-audio", help="Manage the optional Waydroid high-resolution audio policy")
+    audio_parser.add_argument("action", choices=["enable", "disable", "status"])
+    audio_parser.add_argument("--policy-only", action="store_true",
+                               help="Testing only; edit policy without patched HAL (may break audio)")
+    audio_parser.set_defaults(func=lambda args: {
+        "enable": lambda: enable_highres_audio(policy_only=args.policy_only),
+        "disable": lambda: disable_highres_audio(),
+        "status": lambda: status_highres_audio(),
+    }[args.action]())
+
     args = parser.parse_args()
     args.microg_variant = "Standard"
     if hasattr(args, 'func'):
-        args_dict = vars(args)
         helper.check_root()
         args.func(args)
     else:
