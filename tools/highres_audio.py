@@ -491,8 +491,34 @@ def _install_overlay(
         raise
     return payload
 
+def _rootfs_is_mounted() -> bool:
+    """Return whether Waydroid's rootfs or a descendant mount is still active."""
+    findmnt = shutil.which("findmnt")
+    if not findmnt:
+        # Without findmnt, don't claim that a successful stop guarantees an
+        # unmounted overlay. The caller can still rely on Waydroid status below.
+        return False
+    result = subprocess.run(
+        [findmnt, "-rn", "-o", "TARGET"],
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+        timeout=10,
+    )
+    if result.returncode not in (0, 1):
+        raise RuntimeError(f"Could not inspect mounts with findmnt: {result.stderr.strip()}")
+    for target in result.stdout.splitlines():
+        if target == "/var/lib/waydroid/rootfs" or target.startswith("/var/lib/waydroid/rootfs/"):
+            return True
+    return False
+
+
 def _stop_container() -> None:
-    # Stop the session first so overlay files cannot be open in a mounted rootfs.
+    """Stop Waydroid and make sure its rootfs is unmounted before editing overlays."""
+    if not shutil.which("waydroid"):
+        raise RuntimeError("waydroid command not found")
+
     subprocess.run(
         ["waydroid", "session", "stop"],
         text=True,
@@ -501,7 +527,7 @@ def _stop_container() -> None:
         check=False,
         timeout=30,
     )
-    result = subprocess.run(
+    stop_result = subprocess.run(
         ["waydroid", "container", "stop"],
         text=True,
         stdout=subprocess.PIPE,
@@ -509,13 +535,51 @@ def _stop_container() -> None:
         check=False,
         timeout=45,
     )
-    if result.returncode:
-        detail = (result.stderr or result.stdout).strip()
+
+    # Some service-managed sessions keep mounts alive after the CLI stop.
+    # Wait briefly, then stop the system service and verify again.
+    deadline = 40
+    still_mounted = _rootfs_is_mounted()
+    while still_mounted and deadline > 0:
+        import time
+        time.sleep(0.25)
+        deadline -= 1
+        still_mounted = _rootfs_is_mounted()
+
+    if still_mounted:
+        systemctl = shutil.which("systemctl")
+        if systemctl:
+            service_stop = subprocess.run(
+                [systemctl, "stop", "waydroid-container.service"],
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                check=False,
+                timeout=45,
+            )
+            if service_stop.returncode:
+                raise RuntimeError(
+                    "Waydroid rootfs is still mounted and the container service could not be stopped: "
+                    + service_stop.stderr.strip()
+                )
+        if _rootfs_is_mounted():
+            raise RuntimeError(
+                "Waydroid rootfs is still mounted; refusing to modify the audio overlay. "
+                "Stop Waydroid and retry."
+            )
+
+    if stop_result.returncode:
         status_result = subprocess.run(
-            ["waydroid", "status"], text=True, stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE, check=False, timeout=15
+            ["waydroid", "status"],
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=False,
+            timeout=15,
         )
-        if status_result.returncode or "Container: STOPPED" not in status_result.stdout:
+        stopped = status_result.returncode == 0 and "Container: STOPPED" in status_result.stdout
+        if not stopped:
+            detail = (stop_result.stderr or stop_result.stdout).strip()
             raise RuntimeError(f"Could not stop Waydroid container: {detail}")
 
 
