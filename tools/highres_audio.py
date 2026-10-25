@@ -1,25 +1,24 @@
 #!/usr/bin/env python3
-"""Install a reversible high-resolution audio policy/configuration for Waydroid.
+"""Inspect and safely manage Waydroid high-resolution audio policy settings.
 
-This implementation edits only the active Waydroid overlay for the current
-system image layout. It does not fetch or install an unverified binary HAL.
-A patched HAL is needed for actual 24-bit PCM support, so the tool first checks
-whether the existing HAL already supports 24-bit formats and otherwise tells
-the user that a matching HAL build is required instead of claiming success.
+The stock Waydroid HAL hard-codes 48 kHz S16_LE playback. This helper does not
+pretend that an XML-only change enables high-resolution audio. It supports
+status reporting and a reversible policy-only test behind an explicit flag.
+A matching, source-built high-resolution HAL is required for a complete fix.
 """
 from __future__ import annotations
 
 import configparser
 import os
 import shutil
-import subprocess
 from pathlib import Path
-from typing import Optional
+import xml.etree.ElementTree as ET
 
 CONFIG_PATH = Path(os.environ.get("WAYDROID_CONFIG", "/var/lib/waydroid/waydroid.cfg"))
 STATE_DIR = Path("/var/lib/waydroid-script/highres-audio")
 STATE_FILE = STATE_DIR / "state.ini"
 SUPPORTED_RATES = ("44100", "48000", "88200", "96000", "176400", "192000")
+HAL_NAME = "audio.primary.waydroid.so"
 
 
 def _config() -> configparser.ConfigParser:
@@ -33,23 +32,20 @@ def _config() -> configparser.ConfigParser:
 
 
 def _overlay_paths() -> tuple[Path, Path, Path]:
-    """Return overlay vendor dir, policy XML and HAL library paths defensively."""
+    """Resolve the persisted vendor overlay and fail closed for unsupported layout."""
     cfg = _config()
-    # With overlayfs, system/vendor trees are under /var/lib/waydroid/overlay.
-    # Without overlayfs, main.py mounts images at /tmp/waydroid for modifications;
-    # callers must not use that ephemeral mount for this long-lived feature.
-    if cfg.get("waydroid", "mount_overlays", fallback="False").lower() == "true":
-        vendor = Path("/var/lib/waydroid/overlay/vendor")
-    else:
+    if cfg.get("waydroid", "mount_overlays", fallback="False").lower() != "true":
         raise RuntimeError(
-            "This high-res audio action currently requires Waydroid overlayfs "
-            "(mount_overlays=True). Non-overlay image editing needs a separate "
-            "transactional image-mount implementation and is intentionally refused."
+            "This command currently supports Waydroid overlayfs only. "
+            "Non-overlay image updates require a separate transactional mount workflow."
         )
+    overlay_root = Path("/var/lib/waydroid/overlay")
+    vendor = overlay_root / "vendor"
     policy = vendor / "etc" / "audio_policy_configuration.xml"
-    hal_candidates = [vendor / "lib64" / "hw" / "audio.primary.waydroid.so",
-                      vendor / "lib" / "hw" / "audio.primary.waydroid.so"]
-    hal = next((p for p in hal_candidates if p.is_file()), hal_candidates[0])
+    hal = next((p for p in (
+        vendor / "lib64" / "hw" / HAL_NAME,
+        vendor / "lib" / "hw" / HAL_NAME,
+    ) if p.is_file()), vendor / "lib64" / "hw" / HAL_NAME)
     return vendor, policy, hal
 
 
@@ -60,109 +56,136 @@ def _read_state() -> configparser.ConfigParser:
     return state
 
 
-def _write_state(policy_backup: Path, policy_path: Path, hal_path: Path) -> None:
+def _save_state(policy: Path, backup: Path) -> None:
     STATE_DIR.mkdir(parents=True, exist_ok=True)
     state = configparser.ConfigParser()
     state["highres_audio"] = {
-        "policy_path": str(policy_path),
-        "policy_backup": str(policy_backup),
-        "hal_path": str(hal_path),
-        "policy_changed": "true",
+        "policy_path": str(policy),
+        "policy_backup": str(backup),
     }
-    temp = STATE_FILE.with_suffix(".tmp")
-    with temp.open("w", encoding="utf-8") as stream:
-        state.write(stream)
-    os.replace(temp, STATE_FILE)
-
-
-def _patched_hal_supports_highres(hal_path: Path) -> bool:
-    """Compiled binary detection is not reliable; only trust explicit user build metadata.
-
-    A matching HAL binary should be provided as a build artifact, not downloaded
-    and substituted without an architecture/Android-version compatibility check.
-    """
-    return False
+    temporary = STATE_FILE.with_suffix(".tmp")
+    with temporary.open("w", encoding="utf-8") as handle:
+        state.write(handle)
+    os.replace(temporary, STATE_FILE)
 
 
 def enable(policy_only: bool = False) -> None:
-    vendor, policy, hal = _overlay_paths()
+    _vendor, policy, hal = _overlay_paths()
     if not policy.is_file():
         raise RuntimeError(f"Audio policy XML not found: {policy}")
     if not hal.is_file():
         raise RuntimeError(f"Waydroid audio HAL not found: {hal}")
 
-    policy_text = policy.read_text(encoding="utf-8")
-    if "AUDIO_FORMAT_PCM_16_BIT" not in policy_text or 'samplingRates="48000"' not in policy_text:
-        print("Audio policy no longer matches the expected stock 16-bit/48 kHz profile; no changes made.")
+    text = policy.read_text(encoding="utf-8")
+    if "AUDIO_FORMAT_PCM_24_BIT_PACKED" in text:
+        print("The audio policy already advertises packed 24-bit PCM; no policy change made.")
+        print("Check the installed HAL and active stream format separately.")
         return
 
     if not policy_only:
-        print("The stock HAL binary cannot be patched safely at runtime. A source-built, matching high-res HAL is required.")
-        print("Use the helper's policy-only mode only for testing; it advertises formats the stock HAL may reject.")
-        print("No changes made. Build a patched HAL for this Android image before enabling high-res output.")
+        print("No changes made.")
+        print("The stock HAL hard-codes 48 kHz S16_LE output; policy XML alone cannot enable 24-bit audio.")
+        print("Install a source-built HAL matching your Waydroid Android branch and architecture first.")
+        print("Use --policy-only only for testing; the stock HAL may reject the advertised formats.")
         return
 
-    backup = policy.with_name(policy.name + ".waydroid-script-backup")
-    if not backup.exists():
-        shutil.copy2(policy, backup)
-    replacement = policy_text.replace(
-        'format="AUDIO_FORMAT_PCM_16_BIT"\n                             samplingRates="48000" channelMasks="AUDIO_CHANNEL_OUT_STEREO"',
-        'format="AUDIO_FORMAT_PCM_16_BIT,AUDIO_FORMAT_PCM_24_BIT_PACKED,AUDIO_FORMAT_PCM_8_24_BIT,AUDIO_FORMAT_PCM_32_BIT"\n                             samplingRates="' + ",".join(SUPPORTED_RATES) + '" channelMasks="AUDIO_CHANNEL_OUT_STEREO"',
+    expected = (
+        'format="AUDIO_FORMAT_PCM_16_BIT"\n'
+        '                             samplingRates="48000" channelMasks="AUDIO_CHANNEL_OUT_STEREO"'
+    )
+    if expected not in text:
+        raise RuntimeError("Could not identify the expected primary-output XML profile; no changes made")
+
+    replacement = text.replace(
+        expected,
+        'format="AUDIO_FORMAT_PCM_16_BIT,AUDIO_FORMAT_PCM_24_BIT_PACKED,AUDIO_FORMAT_PCM_8_24_BIT,AUDIO_FORMAT_PCM_32_BIT"\n'
+        '                             samplingRates="' + ",".join(SUPPORTED_RATES)
+        + '" channelMasks="AUDIO_CHANNEL_OUT_STEREO"',
         1,
     )
-    if replacement == policy_text:
-        raise RuntimeError("Could not identify the stock primary-output profile; no changes made")
-    # Validate XML syntax before committing the edit.
-    import xml.etree.ElementTree as ET
+    if replacement == text:
+        raise RuntimeError("Audio policy was not changed; no file was written")
     ET.fromstring(replacement)
-    temp = policy.with_suffix(policy.suffix + ".tmp")
-    temp.write_text(replacement, encoding="utf-8")
-    os.replace(temp, policy)
-    _write_state(backup, policy, hal)
-    print("Updated output policy only. This is not complete high-res support until a compatible patched HAL is installed.")
+
+    backup = policy.with_name(policy.name + ".waydroid-script-backup")
+    if backup.exists():
+        raise RuntimeError(f"Backup already exists at {backup}; restore or inspect it before retrying")
+    # Write state only after a complete backup is safely created.
+    shutil.copy2(policy, backup)
+    temporary = policy.with_suffix(policy.suffix + ".tmp")
+    try:
+        temporary.write_text(replacement, encoding="utf-8")
+        ET.parse(temporary)
+        os.replace(temporary, policy)
+        _save_state(policy, backup)
+    except Exception:
+        temporary.unlink(missing_ok=True)
+        if backup.exists() and not policy.read_text(encoding="utf-8") == replacement:
+            backup.unlink(missing_ok=True)
+        raise
+
+    print("Updated the policy XML only. This does not enable high-res playback without a compatible patched HAL.")
+    print("If audio fails, run: sudo venv/bin/python3 main.py highres-audio disable")
 
 
 def disable() -> None:
     state = _read_state()
-    if "highres_audio" not in state:
-        print("No high-res audio state is recorded; nothing to restore.")
-        return
-    section = state["highres_audio"]
-    policy = Path(section.get("policy_path", ""))
-    backup = Path(section.get("policy_backup", ""))
-    if not policy.is_file():
-        raise RuntimeError(f"Saved audio policy path no longer exists: {policy}")
-    if backup.is_file():
-        shutil.copy2(backup, policy)
-        backup.unlink()
+    if "highres_audio" in state:
+        section = state["highres_audio"]
+        policy = Path(section.get("policy_path", ""))
+        backup = Path(section.get("policy_backup", ""))
     else:
-        raise RuntimeError(f"Backup is missing; refusing to remove or rewrite {policy}")
+        # Allow recovery if state writing failed after policy update.
+        try:
+            _vendor, policy, _hal = _overlay_paths()
+        except RuntimeError as exc:
+            raise RuntimeError(f"No backup state exists. {exc}") from exc
+        backup = policy.with_name(policy.name + ".waydroid-script-backup")
+
+    if not backup.is_file():
+        raise RuntimeError(f"Policy backup not found: {backup}; refusing to modify anything")
+    if not policy.is_file():
+        raise RuntimeError(f"Policy path no longer exists: {policy}")
+
+    temporary = policy.with_suffix(policy.suffix + ".restore.tmp")
+    shutil.copy2(backup, temporary)
+    ET.parse(temporary)
+    os.replace(temporary, policy)
+    backup.unlink()
     STATE_FILE.unlink(missing_ok=True)
-    print("Restored the original audio policy configuration. Any separately installed HAL binary must be restored separately.")
+    print("Restored the original Waydroid audio policy XML.")
+    print("If you separately installed a custom HAL, restore that HAL separately.")
 
 
 def status() -> None:
     try:
         _vendor, policy, hal = _overlay_paths()
     except RuntimeError as exc:
-        print(exc)
+        print(str(exc))
         return
-    print(f"Audio policy: {policy} ({'present' if policy.is_file() else 'missing'})")
-    print(f"Waydroid HAL: {hal} ({'present' if hal.is_file() else 'missing'})")
+    print(f"Policy XML: {policy} ({'present' if policy.is_file() else 'missing'})")
+    print(f"HAL library: {hal} ({'present' if hal.is_file() else 'missing'})")
     if policy.is_file():
         contents = policy.read_text(encoding="utf-8")
-        print("Policy advertises 24-bit formats." if "AUDIO_FORMAT_PCM_24_BIT_PACKED" in contents else
-              "Policy currently advertises no packed 24-bit output profile.")
+        if "AUDIO_FORMAT_PCM_24_BIT_PACKED" in contents:
+            print("The policy advertises packed 24-bit PCM. This alone does not prove HAL support.")
+        else:
+            print("The policy does not advertise packed 24-bit PCM.")
     state = _read_state()
-    print("Backup state exists." if "highres_audio" in state else "No backup state recorded by this tool.")
+    print("A backup is recorded by this helper." if "highres_audio" in state else
+          "No active policy backup is recorded by this helper.")
 
 
 def main() -> int:
     import argparse
+
     parser = argparse.ArgumentParser(description="Waydroid high-resolution audio policy helper")
     parser.add_argument("action", choices=("enable", "disable", "status"))
-    parser.add_argument("--policy-only", action="store_true",
-                        help="Testing only: edit policy profile without a patched HAL (may cause audio failure)")
+    parser.add_argument(
+        "--policy-only",
+        action="store_true",
+        help="Testing only: edit policy XML without a patched HAL (may cause audio failure)",
+    )
     args = parser.parse_args()
     try:
         if args.action == "enable":
@@ -171,7 +194,7 @@ def main() -> int:
             disable()
         else:
             status()
-    except (OSError, RuntimeError, subprocess.SubprocessError) as exc:
+    except (OSError, RuntimeError, ET.ParseError) as exc:
         print(f"High-resolution audio operation failed: {exc}")
         return 1
     return 0
