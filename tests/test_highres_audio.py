@@ -122,6 +122,16 @@ class HighResPatcherTests(unittest.TestCase):
             self.assertTrue(MODULE._restore_pipewire_dropin(info))
             self.assertFalse(destination.exists())
 
+    def test_rootfs_mount_detection(self) -> None:
+        with patch.object(MODULE.shutil, "which", return_value="/usr/bin/findmnt"), patch.object(
+            MODULE.subprocess, "run"
+        ) as run:
+            run.return_value.returncode = 0
+            run.return_value.stdout = "/\n/var/lib/waydroid/rootfs\n"
+            self.assertTrue(MODULE._rootfs_is_mounted())
+            run.return_value.stdout = "/\n/home\n"
+            self.assertFalse(MODULE._rootfs_is_mounted())
+
     def test_overlay_config_update_preserves_mode_and_other_values(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             config_path = Path(temp) / "waydroid.cfg"
