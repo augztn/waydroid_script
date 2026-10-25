@@ -306,7 +306,6 @@ def main():
                         default="13",
                         choices=["11", "13"])
 
-    # android command
     certified = subparsers.add_parser(
         'certified', help='Get device ID to obtain Play Store certification')
     certified.set_defaults(func=get_certified)
@@ -314,11 +313,7 @@ def main():
     install_choices = ["gapps", "microg", "libndk", "libhoudini",
                        "magisk", "mitm", "smartdock", "widevine"]
     hack_choices = ["nodataperm", "hidestatusbar"]
-    arg_template = {
-        "dest": "app",
-        "type": str,
-        "nargs": '+',
-    }
+    arg_template = {"dest": "app", "type": str, "nargs": '+'}
 
     install_help = """
 gapps: Install Open GApps (Android 11) or MindTheGapps (Android 13)
@@ -358,7 +353,8 @@ widevine: Add support for Widevine DRM L3
     args = parser.parse_args()
     args.microg_variant = "Standard"
     if hasattr(args, 'func'):
-        helper.check_root() if args.command not in ("audio24",) else None
+        if args.command != "audio24":
+            helper.check_root()
         args.func(args)
     else:
         helper.check_root()
