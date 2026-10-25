@@ -110,18 +110,18 @@ def enable(policy_only: bool = False) -> None:
     backup = policy.with_name(policy.name + ".waydroid-script-backup")
     if backup.exists():
         raise RuntimeError(f"Backup already exists at {backup}; restore or inspect it before retrying")
-    # Write state only after a complete backup is safely created.
+
+    # Commit the backup first. Keep it if later operations fail so recovery is possible.
     shutil.copy2(policy, backup)
+    STATE_DIR.mkdir(parents=True, exist_ok=True)
+    _save_state(policy, backup)
     temporary = policy.with_suffix(policy.suffix + ".tmp")
     try:
         temporary.write_text(replacement, encoding="utf-8")
         ET.parse(temporary)
         os.replace(temporary, policy)
-        _save_state(policy, backup)
     except Exception:
         temporary.unlink(missing_ok=True)
-        if backup.exists() and not policy.read_text(encoding="utf-8") == replacement:
-            backup.unlink(missing_ok=True)
         raise
 
     print("Updated the policy XML only. This does not enable high-res playback without a compatible patched HAL.")
@@ -135,7 +135,6 @@ def disable() -> None:
         policy = Path(section.get("policy_path", ""))
         backup = Path(section.get("policy_backup", ""))
     else:
-        # Allow recovery if state writing failed after policy update.
         try:
             _vendor, policy, _hal = _overlay_paths()
         except RuntimeError as exc:
@@ -148,9 +147,13 @@ def disable() -> None:
         raise RuntimeError(f"Policy path no longer exists: {policy}")
 
     temporary = policy.with_suffix(policy.suffix + ".restore.tmp")
-    shutil.copy2(backup, temporary)
-    ET.parse(temporary)
-    os.replace(temporary, policy)
+    try:
+        shutil.copy2(backup, temporary)
+        ET.parse(temporary)
+        os.replace(temporary, policy)
+    except Exception:
+        temporary.unlink(missing_ok=True)
+        raise
     backup.unlink()
     STATE_FILE.unlink(missing_ok=True)
     print("Restored the original Waydroid audio policy XML.")
